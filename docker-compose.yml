@@ -1,0 +1,117 @@
+name: edgefleet
+
+# DEV ONLY credentials. Every password in this file is a throwaway value
+# for the local demo; a real deployment injects secrets from a vault.
+x-db-passwords: &db-passwords
+  DB_OWNER_PASSWORD: dev-owner-pw
+  DB_API_PASSWORD: dev-api-pw
+  DB_INGESTOR_PASSWORD: dev-ingestor-pw
+
+x-owner-db: &owner-db
+  MIGRATIONS_DATABASE_URL: postgresql+asyncpg://edgefleet_owner:dev-owner-pw@postgres:5432/edgefleet
+
+# Shared settings for every simulated edge server.
+x-edge-sim: &edge-sim
+  build: ./edge-sim
+  depends_on: [mosquitto]
+  restart: unless-stopped
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    entrypoint: ["/bin/sh", "/mosquitto/config/init.sh"]
+    volumes:
+      - ./mosquitto:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+    ports:
+      - "127.0.0.1:1883:1883"   # only for local debugging with an MQTT client
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16.6
+    environment:
+      POSTGRES_PASSWORD: dev-postgres-pw
+      <<: *db-passwords
+    volumes:
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"   # 5433: the host already runs its own Postgres on 5432
+    healthcheck:
+      # -h 127.0.0.1: during first-time init Postgres only listens on a unix
+      # socket, so this stays "unhealthy" until init scripts have finished.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "edgefleet"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # One-shot: apply migrations, load demo data, exit.
+  migrate:
+    build: ./backend
+    command: sh -c "alembic upgrade head && python -m app.seed"
+    environment:
+      <<: *owner-db
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  ingestor:
+    build: ./backend
+    command: python -m app.ingestor
+    environment:
+      MQTT_PASSWORD: dev-ingestor-pw
+      DATABASE_URL: postgresql+asyncpg://edgefleet_ingestor:dev-ingestor-pw@postgres:5432/edgefleet
+    depends_on:
+      mosquitto: { condition: service_started }
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  # Tenant A: two sites, site-a1 has two devices.
+  edge-a1-01:
+    <<: *edge-sim
+    environment:
+      TENANT_ID: tenant-a
+      SITE_ID: site-a1
+      DEVICE_ID: edge-a1-01
+      MQTT_PASSWORD: dev-edge-a1-01-pw
+    volumes:
+      - edge-a1-01-data:/data   # outbox survives container restarts
+
+  edge-a1-02:
+    <<: *edge-sim
+    environment:
+      TENANT_ID: tenant-a
+      SITE_ID: site-a1
+      DEVICE_ID: edge-a1-02
+      MQTT_PASSWORD: dev-edge-a1-02-pw
+    volumes:
+      - edge-a1-02-data:/data
+
+  edge-a2-01:
+    <<: *edge-sim
+    environment:
+      TENANT_ID: tenant-a
+      SITE_ID: site-a2
+      DEVICE_ID: edge-a2-01
+      MQTT_PASSWORD: dev-edge-a2-01-pw
+    volumes:
+      - edge-a2-01-data:/data
+
+  # Tenant B: one site.
+  edge-b1-01:
+    <<: *edge-sim
+    environment:
+      TENANT_ID: tenant-b
+      SITE_ID: site-b1
+      DEVICE_ID: edge-b1-01
+      MQTT_PASSWORD: dev-edge-b1-01-pw
+    volumes:
+      - edge-b1-01-data:/data
+
+volumes:
+  mosquitto-data:
+  postgres-data:
+  edge-a1-01-data:
+  edge-a1-02-data:
+  edge-a2-01-data:
+  edge-b1-01-data:

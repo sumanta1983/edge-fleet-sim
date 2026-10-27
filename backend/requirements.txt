@@ -1,0 +1,6 @@
+paho-mqtt==2.1.0
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+pydantic==2.10.3
+bcrypt==4.2.1

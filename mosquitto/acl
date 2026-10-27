@@ -1,0 +1,44 @@
+# Topic layout: tenants/{tenant}/sites/{site}/devices/{device}/{kind}
+#
+# Each device is pinned to its OWN full topic path, including tenant and
+# site. The ingestor takes tenant/site/device identity from the topic, so
+# this ACL is what stops a device from posing as another device or tenant.
+# (A "+" wildcard pattern like tenants/+/.../devices/%u/events would let a
+# device publish under any tenant's prefix - too loose.)
+
+# Cloud side: reads everything devices send up.
+user ingestor
+topic read tenants/+/sites/+/devices/+/events
+topic read tenants/+/sites/+/devices/+/state
+topic read tenants/+/sites/+/devices/+/ack
+
+# Tenant A, site A1
+user edge-a1-01
+topic write tenants/tenant-a/sites/site-a1/devices/edge-a1-01/events
+topic write tenants/tenant-a/sites/site-a1/devices/edge-a1-01/state
+topic write tenants/tenant-a/sites/site-a1/devices/edge-a1-01/ack
+topic read  tenants/tenant-a/sites/site-a1/devices/edge-a1-01/config
+topic read  tenants/tenant-a/sites/site-a1/devices/edge-a1-01/release
+
+user edge-a1-02
+topic write tenants/tenant-a/sites/site-a1/devices/edge-a1-02/events
+topic write tenants/tenant-a/sites/site-a1/devices/edge-a1-02/state
+topic write tenants/tenant-a/sites/site-a1/devices/edge-a1-02/ack
+topic read  tenants/tenant-a/sites/site-a1/devices/edge-a1-02/config
+topic read  tenants/tenant-a/sites/site-a1/devices/edge-a1-02/release
+
+# Tenant A, site A2
+user edge-a2-01
+topic write tenants/tenant-a/sites/site-a2/devices/edge-a2-01/events
+topic write tenants/tenant-a/sites/site-a2/devices/edge-a2-01/state
+topic write tenants/tenant-a/sites/site-a2/devices/edge-a2-01/ack
+topic read  tenants/tenant-a/sites/site-a2/devices/edge-a2-01/config
+topic read  tenants/tenant-a/sites/site-a2/devices/edge-a2-01/release
+
+# Tenant B, site B1
+user edge-b1-01
+topic write tenants/tenant-b/sites/site-b1/devices/edge-b1-01/events
+topic write tenants/tenant-b/sites/site-b1/devices/edge-b1-01/state
+topic write tenants/tenant-b/sites/site-b1/devices/edge-b1-01/ack
+topic read  tenants/tenant-b/sites/site-b1/devices/edge-b1-01/config
+topic read  tenants/tenant-b/sites/site-b1/devices/edge-b1-01/release
