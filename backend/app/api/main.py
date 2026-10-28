@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import paho.mqtt.client as mqtt
 from fastapi import FastAPI
 
-from app.api import auth, configs, events, fleet, kpis
+from app.api import auth, configs, events, fleet, kpis, releases
 from app.db import make_engine
 
 
@@ -33,12 +33,13 @@ async def lifespan(app: FastAPI):
     await app.state.engine.dispose()
 
 
-app = FastAPI(title="edgefleet-sim API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="edgefleet-sim API", version="0.5.0", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(fleet.router)
 app.include_router(events.router)
 app.include_router(kpis.router)
 app.include_router(configs.router)
+app.include_router(releases.router)
 
 
 @app.get("/healthz", tags=["ops"])

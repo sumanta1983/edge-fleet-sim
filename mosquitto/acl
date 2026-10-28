@@ -6,17 +6,21 @@
 # (A "+" wildcard pattern like tenants/+/.../devices/%u/events would let a
 # device publish under any tenant's prefix - too loose.)
 
-# Cloud side: the ingestor reads everything devices send up, and re-sends
-# desired config to devices that fall behind (reconciliation).
+# Cloud side: the ingestor reads everything devices send up, re-sends
+# desired config to devices that fall behind (reconciliation), and sends
+# release commands as a rollout moves from the canary to the rest.
 user ingestor
 topic read  tenants/+/sites/+/devices/+/events
 topic read  tenants/+/sites/+/devices/+/state
 topic read  tenants/+/sites/+/devices/+/ack
 topic write tenants/+/sites/+/devices/+/config
+topic write tenants/+/sites/+/devices/+/release
 
-# The API pushes desired config when an operator changes it.
+# The API pushes desired config when an operator changes it, and the
+# canary's release command when a rollout starts (or clears it on halt).
 user api
 topic write tenants/+/sites/+/devices/+/config
+topic write tenants/+/sites/+/devices/+/release
 
 # Tenant A, site A1
 user edge-a1-01

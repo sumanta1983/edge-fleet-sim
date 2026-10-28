@@ -6,9 +6,9 @@ If the ingestor crashes in between, the broker still holds the message
 (persistent session) and redelivers it; the (device_id, seq) unique
 constraint turns that redelivery into a harmless no-op.
 
-It is also the config reconciler: every heartbeat reports which config
-version a device runs, and if that is behind the desired version (and the
-device hasn't answered for that version yet) the config is re-sent.
+It is also the cloud's control loop. On every heartbeat it re-sends desired
+config to a device that is behind, and on every heartbeat or ack it moves
+the tenant's active release rollout forward (see app/rollout.py).
 """
 import asyncio
 import logging
@@ -20,15 +20,16 @@ from typing import NamedTuple
 
 import paho.mqtt.client as mqtt
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config_push import config_message, config_topic, latest_desired
 from app.db import make_engine, tenant_transaction
-from app.models import ConfigAck, DeviceState, Event
-from app.schemas import AckIn, EventIn, StateIn
+from app import rollout
+from app.models import ConfigAck, DeviceState, Event, ReleaseTarget
+from app.schemas import AckIn, ConfigAckIn, EventIn, StateIn
 
 MQTT_HOST = os.getenv("MQTT_HOST", "mosquitto")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
@@ -98,8 +99,10 @@ async def store_state(engine: AsyncEngine, t: DeviceTopic, payload: bytes) -> St
     return state
 
 
-async def store_ack(engine: AsyncEngine, t: DeviceTopic, payload: bytes) -> None:
-    ack = AckIn.model_validate_json(payload)
+async def store_ack(engine: AsyncEngine, t: DeviceTopic, payload: bytes) -> list[rollout.Publish]:
+    ack = AckIn.validate_json(payload)
+    if not isinstance(ack, ConfigAckIn):
+        return await store_release_ack(engine, t, ack)
     values = dict(
         tenant_id=t.tenant_id,
         site_id=t.site_id,
@@ -118,6 +121,28 @@ async def store_ack(engine: AsyncEngine, t: DeviceTopic, payload: bytes) -> None
     async with tenant_transaction(engine, t.tenant_id) as conn:
         await conn.execute(stmt)
     log.info("config ack %s v%d %s %s", t.device_id, ack.version, ack.status, ack.error or "")
+    return []
+
+
+async def store_release_ack(engine: AsyncEngine, t: DeviceTopic, ack) -> list[rollout.Publish]:
+    async with tenant_transaction(engine, t.tenant_id) as conn:
+        result = await conn.execute(
+            update(ReleaseTarget)
+            .where(ReleaseTarget.release_id == ack.release_id, ReleaseTarget.device_id == t.device_id)
+            .values(status=ack.status, error=ack.error, finished_at=ack.acked_at)
+        )
+        if result.rowcount == 0:
+            log.warning("release ack from %s for release #%d it isn't part of", t.device_id, ack.release_id)
+            return []
+        log.info("release ack %s #%d %s %s %s", t.device_id, ack.release_id, ack.version, ack.status, ack.error or "")
+        return await rollout.advance(conn)
+
+
+async def rollout_on_heartbeat(engine: AsyncEngine, t: DeviceTopic) -> list[rollout.Publish]:
+    # Any heartbeat from the tenant is a chance to notice a canary timeout,
+    # even if the canary itself has gone silent.
+    async with tenant_transaction(engine, t.tenant_id) as conn:
+        return await rollout.advance(conn) + await rollout.resend_unanswered(conn, t.device_id)
 
 
 async def config_to_resend(engine: AsyncEngine, t: DeviceTopic, reported_version: int) -> tuple[int, str] | None:
@@ -201,6 +226,7 @@ class Ingestor:
         delay = 1
         while True:
             try:
+                publishes: list[rollout.Publish] = []
                 if t.kind == "events":
                     await store_event(self.engine, t, msg.payload)
                 elif t.kind == "state":
@@ -214,10 +240,15 @@ class Ingestor:
                         self.client.publish(config_topic(*t[:3]), message, qos=1, retain=True)
                         log.info("reconcile: %s reports config v%d, re-sent v%d",
                                  t.device_id, state.config_version, version)
+                    publishes = await rollout_on_heartbeat(self.engine, t)
                 elif t.kind == "ack":
-                    await store_ack(self.engine, t, msg.payload)
+                    publishes = await store_ack(self.engine, t, msg.payload)
                 else:
                     log.warning("ignoring unexpected topic %s", msg.topic)
+                # Only now: the transaction that decided these has committed.
+                for p in publishes:
+                    self.client.publish(p.topic, p.payload, qos=1, retain=True)
+                    log.info("rollout: %s %s", "cleared" if not p.payload else "sent", p.topic)
                 return
             except (ValidationError, IntegrityError, ProgrammingError) as e:
                 log.warning("dropping bad message on %s: %s", msg.topic, str(e).splitlines()[0])

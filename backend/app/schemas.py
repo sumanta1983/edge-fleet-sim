@@ -1,9 +1,9 @@
 """Pydantic models for what travels over MQTT. Anything a device sends that
 doesn't validate is rejected before it gets anywhere near the database."""
 import uuid
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 EventType = Literal[
     "near_miss", "ppe_violation", "speed_violation", "gate_triggered", "label_read", "loading_session_completed"
@@ -62,9 +62,22 @@ class SiteConfig(BaseModel):
         return zones
 
 
-class AckIn(BaseModel):
-    kind: Literal["config"]  # "release" joins in phase 5
+class ConfigAckIn(BaseModel):
+    kind: Literal["config"]
     version: int = Field(ge=1)
     status: Literal["applied", "failed"]
     error: str | None = None
     acked_at: AwareDatetime
+
+
+class ReleaseAckIn(BaseModel):
+    kind: Literal["release"]
+    release_id: int = Field(ge=1)
+    version: str
+    status: Literal["succeeded", "rolled_back", "failed"]
+    error: str | None = None
+    acked_at: AwareDatetime
+
+
+# Both kinds of ack share the .../ack topic; "kind" says which model applies.
+AckIn = TypeAdapter(Annotated[Union[ConfigAckIn, ReleaseAckIn], Field(discriminator="kind")])

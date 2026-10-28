@@ -99,3 +99,31 @@ class ConfigAck(Base):
     error: Mapped[str | None]
     acked_at: Mapped[datetime]
     received_at: Mapped[datetime] = mapped_column(server_default="now()")
+
+
+class Release(Base):
+    __tablename__ = "releases"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[str]
+    site_id: Mapped[str | None]
+    version: Mapped[str]
+    checksum: Mapped[str]
+    status: Mapped[str] = mapped_column(server_default="rolling_out")
+    halt_reason: Mapped[str | None]
+    created_by: Mapped[uuid.UUID | None]
+    created_at: Mapped[datetime] = mapped_column(server_default="now()")
+    finished_at: Mapped[datetime | None]
+
+
+class ReleaseTarget(Base):
+    __tablename__ = "release_targets"
+    release_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    device_id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[str]
+    site_id: Mapped[str]
+    wave: Mapped[int]
+    status: Mapped[str] = mapped_column(server_default="pending")
+    from_version: Mapped[str | None]
+    error: Mapped[str | None]
+    sent_at: Mapped[datetime | None]
+    finished_at: Mapped[datetime | None]

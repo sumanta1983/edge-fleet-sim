@@ -445,3 +445,116 @@ site catches exact races.
 A: The device knows things the cloud doesn't (hardware limits, firmware
 capabilities). It must never apply a config it can't honour, and it reports
 the reason back so the operator can fix it.
+
+## Phase 5 – Releases: staged rollout, health check, rollback, halt
+
+### The flow
+
+```
+operator ──POST /releases {version}──▶ API
+   API: pick an ONLINE device as canary; release_targets: canary "sent", rest "pending" → COMMIT
+   API: publish release command (retained) to the canary only
+canary: download → verify sha256 → install → health check
+          ├─ ok   → ack "succeeded"
+          └─ fail → roll back to previous version → ack "rolled_back"
+ingestor (on every ack and heartbeat): rollout.advance()
+   canary succeeded            → send to wave 1 → all answered → "completed"
+   canary rolled_back / failed → "halted", wave 1 "skipped", retained commands deleted
+   canary silent for 60 s      → "timed_out" → "halted"
+```
+
+### Why a canary
+
+Every device runs the same code, so if a release is broken it's usually
+broken everywhere. Trying it on **one** device first limits the damage to one
+device. Real systems use more waves (1 device → 5% → 25% → 100%), often with a
+pause between waves to watch metrics. We use two waves to keep it readable.
+
+The canary must be **online** when the rollout starts. Its answer decides the
+fate of the rollout, so we need that answer quickly.
+
+### Silence is not success
+
+If the canary never answers (it crashed, the network died), we don't wait
+forever, and we never assume it went fine. After 60 s it's `timed_out` and the
+rollout halts. The check runs on **any** heartbeat from the tenant, so it still
+fires when the canary itself is the one that went quiet.
+
+### The device protects itself
+
+- **Checksum** before installing: a damaged download (`*-corrupt` in the demo)
+  is refused → `failed`, nothing changed.
+- **Health check** after installing: the new version has to prove it works
+  (`*-bad` in the demo: 0/8 cameras) → automatic **rollback** → `rolled_back`.
+- **Crash during install**: before switching, the device saves
+  `previous_version` and `install_state=installing`. If it boots and finds that
+  flag, it rolls back. Tested by killing the container in the middle of an install.
+
+On real hardware this is **A/B partitions**: write the new image to the
+inactive slot, boot it once, and if it doesn't confirm itself healthy, the
+bootloader switches back to the old slot. The device is never left with no
+working version.
+
+Rollback happens **on the device**, without the cloud. A device that just
+broke itself may not be able to reach the cloud at all.
+
+### Halt
+
+A halt (automatic or by an operator):
+1. marks every device that hasn't answered as `skipped`;
+2. **deletes the retained release command** (publishes an empty retained
+   message), so an offline device won't install the release when it comes back.
+
+A halt stops **future** installs; it doesn't undo past ones. If a device had
+already received the command, its real answer (`succeeded`) still arrives and
+overwrites `skipped`. To undo it you'd roll out the old version as a new release.
+
+### One rollout at a time
+
+A partial unique index (`UNIQUE (tenant_id) WHERE status = 'rolling_out'`)
+means a tenant can have only one active rollout. Overlapping rollouts could send
+one device two versions and make "which release broke it?" unanswerable.
+`SELECT … FOR UPDATE` on the release row makes the API (halt) and the ingestor
+(acks) take turns, so they can't both change the same rollout at once.
+
+### Same patterns as before
+
+- Retained command + idempotent device handling (`release_id` already handled
+  → just repeat the stored ack).
+- Commit first, then publish; heartbeats re-send any command left unanswered
+  for 30 s (`resend_unanswered`).
+- The state machine (`app/rollout.py`) has no timers: `advance()` is called
+  whenever something might have changed, and calling it twice is harmless.
+
+### Audit
+
+Events already record `software_version`. After a rollback, new events show
+the old version again, so "what was running when this happened?" always has
+an exact answer, including during a bad rollout.
+
+### Interview questions
+
+**Q: How do you roll out software safely to a fleet of edge devices?**
+A: Staged rollout: one canary first, then the rest in waves. Each device
+verifies the artifact checksum (and in production a signature), installs, runs
+a health check, and rolls back on its own if it fails. A failed or silent
+canary halts the rollout before anyone else gets the update.
+
+**Q: What if the canary never reports back?**
+A: Treat silence as failure. After a timeout the canary is marked timed out and
+the rollout halts. The timeout check runs on any event from the tenant, so it
+doesn't depend on the dead device sending anything.
+
+**Q: What if the device crashes in the middle of an update?**
+A: It saves its previous version and an "installing" flag before switching;
+on boot it finds the flag and rolls back. On real hardware: A/B partitions with
+a bootloader that falls back to the last known-good slot.
+
+**Q: Why must rollback happen on the device and not be triggered by the cloud?**
+A: A broken update can take down the network stack or the agent itself. The
+device has to be able to save itself without help.
+
+**Q: What does halting a rollout actually do?**
+A: Devices that haven't been sent the update are skipped, and the retained
+command is deleted so offline devices don't pick it up later. Devices that have
+already installed it keep it; undoing that is a new release of the old version.
