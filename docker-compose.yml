@@ -81,6 +81,16 @@ services:
       migrate: { condition: service_completed_successfully }
     restart: unless-stopped
 
+  # Integration tests in a throwaway database (see backend/tests/conftest.py).
+  # Not started by `docker compose up`; run with: docker compose run --rm tests
+  tests:
+    build: { context: ./backend, target: test }
+    profiles: [test]
+    environment:
+      POSTGRES_PASSWORD: dev-postgres-pw
+    depends_on:
+      postgres: { condition: service_healthy }
+
   # Dashboard: static React build served by nginx, which also proxies
   # /api/* to the api service (same origin, so no CORS).
   web:

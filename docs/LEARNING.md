@@ -650,3 +650,86 @@ steal it. Production: an httpOnly, Secure, SameSite cookie plus CSRF protection.
 **Q: The UI hides buttons from viewers. Is that security?**
 A: No. It's convenience. The API checks the role on every write and returns
 403. Anyone can call the API directly.
+
+## Phase 7 – Proving it: offline demo, tests, demo scripts
+
+### The offline demo, step by step
+
+`scripts/demo-offline.sh` runs `docker network disconnect` on one edge
+container, the closest thing to "the warehouse lost its internet". What happens:
+
+1. The device keeps detecting events and writes each one to its SQLite outbox
+   **first**. The backlog grows (we saw 0 → 20 in 60 s). Nothing reaches the cloud.
+2. Heartbeats stop, so after 30 s the dashboard shows the device **offline**.
+3. On reconnect, paho re-establishes the session and the outbox drains
+   **oldest first**, one QoS 1 message at a time.
+4. The cloud receives events with an old `occurred_at` and a new
+   `received_at`. Both are kept: when it happened vs. when we learned about it.
+5. The script checks the database: no gaps in `seq` (nothing lost) and no
+   duplicates. If a PUBACK was lost and the device re-sent an event, the
+   ingestor logs `duplicate event … ignored` and the `(device_id, seq)`
+   constraint makes it a no-op.
+
+The demo proves **at-least-once delivery + idempotent consumer = effectively
+exactly-once**.
+
+### Why integration tests against real Postgres
+
+The most important guarantees live **in the database**: RLS policies, grants,
+the append-only trigger, `SET LOCAL` scoping. A unit test with a mocked DB or
+SQLite would pass even if every one of those were missing. So the tests:
+
+- create a throwaway database `edgefleet_test` on the compose Postgres,
+- run the **real** Alembic migrations and seed (the schema under test is
+  exactly the production schema),
+- connect as the **real roles** (`edgefleet_api`, `edgefleet_ingestor`,
+  `edgefleet_owner`), because what you can do depends on who you are,
+- drop the database at the end.
+
+Why not reuse the demo database? Events are append-only: test rows could
+never be deleted again. The guarantee we're testing would make cleanup impossible.
+
+The rollout tests drive the **ingestor's real ack handler**, the same code an
+MQTT ack reaches, rather than poking the state machine directly.
+
+### Tests that can fail
+
+A test that can't fail proves nothing. As a check, we broke the code on
+purpose in a throwaway container: removing the canary-failure halt made 2
+rollout tests fail, and changing the idempotency key made 2 ingestion tests
+fail. Then we put the code back. (This is mutation testing, done by hand.)
+
+### What each demo script proves
+
+| Script | Claim it proves |
+|---|---|
+| `demo-offline.sh` | Sites can go offline; events are buffered and backfilled with no loss and no duplicates. |
+| `demo-bad-release.sh` | A broken release is stopped at the canary; the canary heals itself; the fleet never sees it. |
+| `demo-rls.sh` | Tenant isolation holds for hand-written SQL under the app role, not just in the API code. |
+
+### Interview questions
+
+**Q: How do you test row-level security?**
+A: Against a real Postgres, connecting as the actual application role. Assert
+that each tenant sees only its rows, that no tenant set means no rows, that
+the setting doesn't leak between pooled transactions, and that writes for
+another tenant and `SET row_security = off` are refused.
+
+**Q: How did you show the offline buffering actually works?**
+A: By cutting the container off the network, watching the outbox grow, then
+reconnecting and checking the database for gaps and duplicates in the
+per-device sequence numbers. Zero missing, zero duplicates.
+
+**Q: How do you make tests that touch an append-only table repeatable?**
+A: Each test run creates its own database, migrates and seeds it, and drops
+it afterwards. You can't clean up immutable rows, so you throw away the whole database.
+
+**Q: How do you know your tests are meaningful?**
+A: Break the code on purpose and check the tests catch it: mutation testing.
+Here, disabling the canary halt and the idempotency key each made tests fail.
+
+**Q: What would you add before production?**
+A: mTLS device certificates, signed artifacts, A/B partitions, managed
+Postgres with partitioning and archiving, a durable log between broker and
+ingestor, monitoring and alerting, and more rollout waves with bake time.
+(See the README.)
