@@ -56,7 +56,9 @@ def _details(event_type: str, speed_limit_kmh: float) -> tuple[str, dict]:
                 "limit_kmh": speed_limit_kmh,
             }
         case "gate_triggered":
-            return "info", {"direction": random.choice(["in", "out"])}
+            # The gate camera checks everyone walking through for PPE. These
+            # checks are the denominator for the PPE compliance KPI.
+            return "info", {"direction": random.choice(["in", "out"]), "ppe_ok": random.random() < 0.9}
         case "label_read":
             return "info", {"label": f"PAL-{random.randint(0, 999999):06d}"}
         case "loading_session_completed":

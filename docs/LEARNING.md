@@ -238,3 +238,105 @@ storage or hash chaining, because a DB superuser can bypass triggers.
 A: We store both the device timestamp (occurred_at, when it happened) and
 the cloud timestamp (received_at / last_seen_at). Online/offline uses the
 cloud clock, and per-device ordering uses seq, not timestamps.
+
+## Phase 3 – REST API, JWT auth, tenant context per request
+
+### Request flow
+
+```
+client ──Bearer JWT──▶ FastAPI
+                        1. current_user: verify JWT signature + expiry → (user id, tenant_id, role)
+                        2. tenant_conn:  BEGIN; set_config('app.tenant_id', <tenant from JWT>, true)
+                        3. route handler runs plain queries; RLS filters every row
+                        4. COMMIT → the tenant setting disappears with the transaction
+```
+
+The tenant comes **only** from the signed token. There is no `?tenant_id=`
+parameter anywhere, so a client can't ask for someone else's data, and even a
+query that forgets a `WHERE tenant_id = …` is still filtered by Postgres.
+
+### JWT in one paragraph
+
+At login the API checks the password (bcrypt) and returns a token signed with
+a server secret (HS256). The token holds `sub` (user id), `tenant_id`, `role`
+and `exp`. On every request we verify the signature and expiry; no database
+lookup is needed. Trade-off: a stateless token **can't be revoked**, so we keep
+its lifetime short (8 h here; real systems use minutes plus refresh tokens).
+
+### Login before the tenant is known
+
+`users` is protected by RLS, but at login we don't know the tenant yet. Rather
+than give the API role BYPASSRLS, we added **one narrow door**: a
+`SECURITY DEFINER` function `auth_user_by_email(email)` that runs as the schema
+owner and returns just the matching row. The API role can EXECUTE it, but still
+sees 0 rows if it runs `SELECT * FROM users` without a tenant. The function has
+a pinned `search_path` so nobody can trick it into reading a fake `users`
+table, and `EXECUTE` is revoked from everyone else (the ingestor gets
+"permission denied").
+
+Two small login details:
+- bcrypt is deliberately slow, so it runs in a thread (`asyncio.to_thread`)
+  and doesn't block the event loop.
+- An unknown email is still checked against a dummy hash, so attackers can't
+  tell from response times which emails exist.
+
+### Online / offline
+
+A device is online if its last heartbeat (cloud clock) is under 30 s old:
+heartbeats every 10 s, so we tolerate **three** missed ones before flagging it.
+One threshold → no flapping on a single lost QoS 0 heartbeat. Devices that have
+never reported still appear (outer join), as offline.
+
+### Keyset pagination
+
+`/events` uses a cursor `(occurred_at, id)` instead of `OFFSET`.
+- `OFFSET 10000` reads and throws away 10 000 rows; a cursor jumps straight
+  there using the `(tenant_id, occurred_at)` index.
+- New events arrive every second; with OFFSET, page 2 shifts and you see
+  duplicates or miss rows. "Give me rows older than this one" stays stable.
+- `id` breaks ties between events with the same timestamp.
+
+### KPIs in the site's timezone
+
+"Per day" and "per shift" depend on where the warehouse is: 23:00 UTC is
+already tomorrow in Kolkata. Queries use `occurred_at AT TIME ZONE
+site.timezone`. Night shift (22:00–06:00) crosses midnight, so we shift the
+clock back 6 h: all three shifts then fall inside one calendar day, and the
+02:00 part of a night shift belongs to the day the shift started.
+
+PPE compliance needs a **denominator**: violations alone don't say whether 5
+violations is good (out of 1000 people) or bad (out of 6). The gate camera now
+records `ppe_ok` for every person passing, so
+compliance = passed checks / all checks. In-site `ppe_violation` detections
+are reported next to it.
+
+At this scale a live `GROUP BY` is fine. At scale: a materialized view or a
+rollup table the ingestor updates.
+
+### Interview questions
+
+**Q: How does a request end up seeing only its tenant's data?**
+A: The JWT carries the tenant id and is signed by the server. A FastAPI
+dependency opens a transaction and runs `SET LOCAL app.tenant_id` from that
+claim; Postgres RLS policies filter every table on it. The API's DB role has
+no BYPASSRLS and doesn't own the tables, so there's no way around it.
+
+**Q: How do you log a user in when RLS hides the users table?**
+A: A SECURITY DEFINER function that returns only the row for one email,
+with a pinned search_path and EXECUTE granted only to the API role. That's
+a narrow, auditable exception instead of giving the API role BYPASSRLS.
+
+**Q: What are the downsides of JWTs?**
+A: They can't be revoked before they expire, and their claims (role, tenant)
+can go stale. Mitigations: short expiry plus refresh tokens, a deny-list for
+emergencies, or opaque session tokens checked against a store.
+
+**Q: Why cursor pagination instead of page numbers?**
+A: OFFSET gets slower the deeper you go and is unstable on a table that's
+constantly growing. A cursor on (occurred_at, id) is index-friendly and
+stable while new events arrive.
+
+**Q: How do you decide a device is offline?**
+A: Compare the last heartbeat time, measured on the cloud's clock, to a
+timeout of a few heartbeat intervals (here 3 × 10 s). Long enough to ride out
+a lost packet, short enough that operators notice quickly.
