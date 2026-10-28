@@ -81,6 +81,15 @@ services:
       migrate: { condition: service_completed_successfully }
     restart: unless-stopped
 
+  # Dashboard: static React build served by nginx, which also proxies
+  # /api/* to the api service (same origin, so no CORS).
+  web:
+    build: ./web
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on: [api]
+    restart: unless-stopped
+
   # Tenant A: two sites, site-a1 has two devices.
   edge-a1-01:
     <<: *edge-sim

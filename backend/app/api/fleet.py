@@ -1,6 +1,5 @@
 """Fleet overview: which devices exist, and are they alive?"""
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -8,6 +7,7 @@ from sqlalchemy import func, select
 
 from app.api.auth import TenantConn
 from app.models import DesiredConfig, Device, DeviceState, Site
+from app.schemas import Health
 
 # Heartbeats arrive every 10 s. Allowing three missed ones avoids flapping
 # to "offline" on a single dropped QoS 0 heartbeat or a short network blip.
@@ -38,7 +38,7 @@ class DeviceOut(BaseModel):
     last_seen_at: datetime | None
     software_version: str | None
     config_version: int | None
-    health: dict[str, Any] | None
+    health: Health | None
     outbox_backlog: int | None
 
 

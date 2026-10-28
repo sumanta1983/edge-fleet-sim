@@ -558,3 +558,95 @@ device has to be able to save itself without help.
 A: Devices that haven't been sent the update are skipped, and the retained
 command is deleted so offline devices don't pick it up later. Devices that have
 already installed it keep it; undoing that is a new release of the old version.
+
+## Phase 6 – React dashboard with generated API types
+
+### How the pieces fit
+
+```
+browser ──▶ nginx (web, :8080)
+              ├─ /            → static React build (index.html + JS + CSS)
+              └─ /api/*       → proxy to api:8000 (prefix stripped)
+```
+
+The page and the API come from the **same origin** (`localhost:8080`), so the
+browser never makes a cross-origin request and the API needs no CORS setup.
+In development, Vite's dev server does the same proxying (`vite.config.ts`).
+
+Docker builds the bundle in a Node image and ships only the static files in
+a small nginx image: Node never runs in production.
+
+### Types generated from the backend
+
+`npm run gen:api` downloads FastAPI's OpenAPI schema and turns it into
+TypeScript (`src/api/schema.d.ts`). `openapi-fetch` uses those types, so this:
+
+```ts
+api.GET("/fleet/devices/{device_id}", { params: { path: { device_id } } })
+```
+
+is checked at compile time: a wrong path, a missing parameter or a misspelled
+response field fails `npm run build`. If the backend renames a field, you find
+out in the build, not from a blank page in the demo.
+
+Doing this showed weak spots in the API: `health: dict` came out as an
+untyped object and `status: str` as plain `string`. We tightened the Pydantic
+response models (`Health`, `Literal[...]`), and the frontend got exact types
+for free. **The OpenAPI schema is the contract**, so it pays to make it precise.
+
+### Server state with TanStack Query
+
+Almost everything on screen is **server state**: data that lives in the API and
+that the UI only shows a copy of. TanStack Query caches it by key, removes
+duplicate requests, retries 5xx errors (not 4xx), and refetches on an interval:
+
+| Page | Polling | Why |
+|---|---|---|
+| Fleet | 5 s | heartbeats come every 10 s |
+| Rollout in progress | 1.5 s | rollout steps take a few seconds |
+| No active rollout | 10 s | nothing is changing |
+| Config editor | **never** | see below |
+
+**The config editor deliberately doesn't poll.** A refetch would silently
+replace what the operator is typing. Instead it remembers `base_version` and
+the server answers 409 if someone else saved in the meantime. The UI then
+offers "Load latest". Same optimistic-concurrency idea as in phase 4, now visible.
+
+Events use `useInfiniteQuery` with the cursor from phase 3: "Load older
+events" just passes `next_cursor` back.
+
+### Auth in the browser
+
+- The token is kept in `sessionStorage` (cleared when the tab closes). Any
+  script on the page can read it, so an XSS bug would leak it. Production:
+  an httpOnly cookie, which JavaScript can't read.
+- A 401 on any request clears the token and goes to the login page.
+- On logout the query cache is cleared, so the next user can't see the
+  previous user's data.
+- Hiding the "New release" form from viewers is **only UX**. The real check is
+  the API's 403. Never rely on the frontend for authorisation.
+
+### Interview questions
+
+**Q: How do you keep frontend and backend types in sync?**
+A: Generate the TypeScript types from the backend's OpenAPI schema and use a
+typed client. Any mismatch becomes a compile error. Commit the generated file
+and regenerate in CI to catch drift.
+
+**Q: Why put nginx in front instead of calling the API directly from the browser?**
+A: Same origin means no CORS configuration and no API port exposed to the
+browser. nginx also serves the static files efficiently and handles
+client-side routes (`try_files … /index.html`).
+
+**Q: How do you show near-real-time data without WebSockets?**
+A: Polling with TanStack Query, with an interval chosen per screen: fast while
+a rollout is moving, slow otherwise. It's simple and good enough at this scale.
+Next steps would be server-sent events or WebSockets fed by the ingestor.
+
+**Q: Where do you store the JWT in the browser?**
+A: Here sessionStorage, for simplicity. It's readable by JavaScript, so XSS can
+steal it. Production: an httpOnly, Secure, SameSite cookie plus CSRF protection.
+
+**Q: The UI hides buttons from viewers. Is that security?**
+A: No. It's convenience. The API checks the role on every write and returns
+403. Anyone can call the API directly.

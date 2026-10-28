@@ -10,7 +10,7 @@ from sqlalchemy import and_, select, tuple_
 
 from app.api.auth import TenantConn
 from app.models import DesiredConfig, Event
-from app.schemas import EventType, Severity
+from app.schemas import EventType, Severity, SiteConfig
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -36,7 +36,7 @@ class EventOut(BaseModel):
 class EventAudit(EventOut):
     # The full config the device was running (None for version 0, the
     # device's factory default, which the cloud never issued).
-    config: dict[str, Any] | None
+    config: SiteConfig | None
 
 
 class EventPage(BaseModel):

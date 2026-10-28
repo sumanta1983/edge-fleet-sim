@@ -7,6 +7,7 @@ lets an operator halt it.
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from typing import Literal
 
 import paho.mqtt.client as mqtt
 from fastapi import APIRouter, HTTPException, Request
@@ -23,6 +24,9 @@ from app.models import Device, DeviceState, Release, ReleaseTarget, Site
 
 router = APIRouter(prefix="/releases", tags=["releases"])
 
+ReleaseStatus = Literal["rolling_out", "completed", "halted"]
+TargetStatus = Literal["pending", "sent", "succeeded", "rolled_back", "failed", "timed_out", "skipped"]
+
 
 class ReleaseCreate(BaseModel):
     # Anything containing "bad" fails the simulated health check, and
@@ -36,7 +40,7 @@ class TargetOut(BaseModel):
     device_id: str
     site_id: str
     wave: int
-    status: str
+    status: TargetStatus
     from_version: str | None
     error: str | None
     sent_at: datetime | None
@@ -49,12 +53,12 @@ class ReleaseOut(BaseModel):
     version: str
     checksum: str
     site_id: str | None
-    status: str
+    status: ReleaseStatus
     halt_reason: str | None
     created_by: uuid.UUID | None
     created_at: datetime
     finished_at: datetime | None
-    progress: dict[str, int]  # target status -> number of devices
+    progress: dict[TargetStatus, int]  # target status -> number of devices
 
 
 class ReleaseDetail(ReleaseOut):
