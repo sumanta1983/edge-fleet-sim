@@ -6,10 +6,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, tuple_
+from sqlalchemy import and_, select, tuple_
 
 from app.api.auth import TenantConn
-from app.models import Event
+from app.models import DesiredConfig, Event
 from app.schemas import EventType, Severity
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -31,6 +31,12 @@ class EventOut(BaseModel):
     software_version: str
     config_version: int
     details: dict[str, Any]
+
+
+class EventAudit(EventOut):
+    # The full config the device was running (None for version 0, the
+    # device's factory default, which the cloud never issued).
+    config: dict[str, Any] | None
 
 
 class EventPage(BaseModel):
@@ -89,8 +95,18 @@ async def list_events(
 
 
 @router.get("/{event_id}")
-async def get_event(conn: TenantConn, event_id: int) -> EventOut:
-    row = (await conn.execute(select(Event).where(Event.id == event_id))).one_or_none()
+async def get_event(conn: TenantConn, event_id: int) -> EventAudit:
+    """Audit view: the event plus the exact config that was active."""
+    row = (
+        await conn.execute(
+            select(Event, DesiredConfig.config)
+            .outerjoin(
+                DesiredConfig,
+                and_(DesiredConfig.site_id == Event.site_id, DesiredConfig.version == Event.config_version),
+            )
+            .where(Event.id == event_id)
+        )
+    ).one_or_none()
     if row is None:
         raise HTTPException(404, "event not found")
-    return EventOut.model_validate(row)
+    return EventAudit.model_validate(row)

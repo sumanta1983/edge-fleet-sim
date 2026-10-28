@@ -1,14 +1,15 @@
-"""Pydantic models for what devices send over MQTT. Anything that doesn't
-validate is rejected before it gets anywhere near the database."""
+"""Pydantic models for what travels over MQTT. Anything a device sends that
+doesn't validate is rejected before it gets anywhere near the database."""
 import uuid
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 EventType = Literal[
     "near_miss", "ppe_violation", "speed_violation", "gate_triggered", "label_read", "loading_session_completed"
 ]
 Severity = Literal["info", "medium", "high", "critical"]
+ZoneKind = Literal["dock", "aisle", "forklift_lane", "gate", "walkway"]
 
 
 class EventIn(BaseModel):
@@ -36,3 +37,34 @@ class StateIn(BaseModel):
     health: Health
     outbox_backlog: int = Field(ge=0)
     sent_at: AwareDatetime
+
+
+class Zone(BaseModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,31}$")
+    kind: ZoneKind
+
+
+class SiteConfig(BaseModel):
+    """Desired configuration for every edge server at one site."""
+
+    model_config = ConfigDict(extra="forbid")  # a typo'd key is an error, not silently ignored
+    zones: list[Zone] = Field(min_length=1, max_length=20)
+    speed_limit_kmh: float = Field(gt=0, le=40)
+    # A near miss closer than this is "critical" and raises an alert.
+    near_miss_critical_m: float = Field(gt=0, le=5)
+
+    @field_validator("zones")
+    @classmethod
+    def unique_zone_ids(cls, zones: list[Zone]) -> list[Zone]:
+        ids = [z.id for z in zones]
+        if len(ids) != len(set(ids)):
+            raise ValueError("zone ids must be unique")
+        return zones
+
+
+class AckIn(BaseModel):
+    kind: Literal["config"]  # "release" joins in phase 5
+    version: int = Field(ge=1)
+    status: Literal["applied", "failed"]
+    error: str | None = None
+    acked_at: AwareDatetime

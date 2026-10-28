@@ -70,12 +70,14 @@ services:
     build: ./backend
     command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
     environment:
+      MQTT_PASSWORD: dev-api-mqtt-pw
       # Connects as edgefleet_api: not the table owner, no BYPASSRLS.
       DATABASE_URL: postgresql+asyncpg://edgefleet_api:dev-api-pw@postgres:5432/edgefleet
       JWT_SECRET: dev-only-jwt-secret-do-not-use-in-production
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
+      mosquitto: { condition: service_started }
       migrate: { condition: service_completed_successfully }
     restart: unless-stopped
 

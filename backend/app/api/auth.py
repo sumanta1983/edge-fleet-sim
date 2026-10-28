@@ -69,7 +69,14 @@ async def tenant_conn(
         yield conn
 
 
+def require_operator(user: Annotated[CurrentUser, Depends(current_user)]) -> CurrentUser:
+    if user.role != "operator":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only operators can change this")
+    return user
+
+
 CurrentUserDep = Annotated[CurrentUser, Depends(current_user)]
+OperatorDep = Annotated[CurrentUser, Depends(require_operator)]
 TenantConn = Annotated[AsyncConnection, Depends(tenant_conn)]
 
 

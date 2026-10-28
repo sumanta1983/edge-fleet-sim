@@ -54,9 +54,14 @@ class LocalStore:
         return row[0] if row else default
 
     def set(self, key: str, value: str) -> None:
+        self.set_many(**{key: value})
+
+    def set_many(self, **values: str) -> None:
+        # One transaction: after a crash we have all of the values or none,
+        # never a new config with the old config_version.
         with self.db:
-            self.db.execute(
+            self.db.executemany(
                 "INSERT INTO local_state (key, value) VALUES (?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                (key, value),
+                values.items(),
             )

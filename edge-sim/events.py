@@ -8,7 +8,12 @@ import random
 import uuid
 from datetime import datetime, timezone
 
-ZONES = ["dock-1", "dock-2", "aisle-a", "aisle-b", "forklift-lane", "gate-north"]
+# Factory default config (version 0), used until the cloud sends one.
+DEFAULT_CONFIG = {
+    "zones": [{"id": z, "kind": "aisle"} for z in ("zone-1", "zone-2", "zone-3")],
+    "speed_limit_kmh": 10.0,
+    "near_miss_critical_m": 0.5,
+}
 
 # Relative frequencies: routine operational events are far more common
 # than safety incidents.
@@ -22,13 +27,13 @@ WEIGHTS = {
 }
 
 
-def make_event(software_version: str, config_version: int, speed_limit_kmh: float) -> dict:
+def make_event(software_version: str, config_version: int, config: dict) -> dict:
     event_type = random.choices(list(WEIGHTS), weights=list(WEIGHTS.values()))[0]
-    severity, details = _details(event_type, speed_limit_kmh)
+    severity, details = _details(event_type, config)
     return {
         "event_id": str(uuid.uuid4()),
         "type": event_type,
-        "zone": random.choice(ZONES),
+        "zone": random.choice(config["zones"])["id"],
         "severity": severity,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         # Audit requirement: record exactly which software and config made
@@ -39,11 +44,12 @@ def make_event(software_version: str, config_version: int, speed_limit_kmh: floa
     }
 
 
-def _details(event_type: str, speed_limit_kmh: float) -> tuple[str, dict]:
+def _details(event_type: str, config: dict) -> tuple[str, dict]:
+    speed_limit_kmh = config["speed_limit_kmh"]
     match event_type:
         case "near_miss":
             distance = round(random.uniform(0.3, 1.5), 2)
-            return ("critical" if distance < 0.6 else "high"), {
+            return ("critical" if distance < config["near_miss_critical_m"] else "high"), {
                 "min_distance_m": distance,
                 "objects": ["forklift", "pedestrian"],
             }

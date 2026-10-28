@@ -10,9 +10,25 @@ import bcrypt
 from sqlalchemy.dialects.postgresql import insert
 
 from app.db import make_engine, tenant_transaction
-from app.models import Device, Site, Tenant, User
+from app.models import DesiredConfig, Device, Site, Tenant, User
 
 DEV_PASSWORD = "dev-password"  # DEV ONLY
+
+# Version 1 of every site's desired config. Devices boot with a factory
+# default (version 0); the ingestor notices they are behind on their first
+# heartbeat and pushes this to them.
+INITIAL_CONFIG = {
+    "zones": [
+        {"id": "dock-1", "kind": "dock"},
+        {"id": "dock-2", "kind": "dock"},
+        {"id": "aisle-a", "kind": "aisle"},
+        {"id": "aisle-b", "kind": "aisle"},
+        {"id": "forklift-lane", "kind": "forklift_lane"},
+        {"id": "gate-north", "kind": "gate"},
+    ],
+    "speed_limit_kmh": 8.0,
+    "near_miss_critical_m": 0.6,
+}
 
 TENANTS = [
     {
@@ -51,6 +67,11 @@ async def main() -> None:
                 await conn.execute(
                     insert(Site)
                     .values(id=s["id"], tenant_id=t["id"], name=s["name"], timezone=s["timezone"])
+                    .on_conflict_do_nothing()
+                )
+                await conn.execute(
+                    insert(DesiredConfig)
+                    .values(tenant_id=t["id"], site_id=s["id"], version=1, config=INITIAL_CONFIG)
                     .on_conflict_do_nothing()
                 )
                 for device_id in s["devices"]:

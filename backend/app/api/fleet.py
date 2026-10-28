@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 
 from app.api.auth import TenantConn
-from app.models import Device, DeviceState, Site
+from app.models import DesiredConfig, Device, DeviceState, Site
 
 # Heartbeats arrive every 10 s. Allowing three missed ones avoids flapping
 # to "offline" on a single dropped QoS 0 heartbeat or a short network blip.
@@ -31,8 +31,10 @@ class DeviceOut(BaseModel):
     site_id: str
     site_name: str
     online: bool
+    # What the cloud wants this device to run (None: site has no config yet).
+    desired_config_version: int | None
     # Everything below is the device's REPORTED state; None until its first
-    # heartbeat. Desired config (what the cloud wants) arrives in phase 4.
+    # heartbeat. config_version != desired_config_version means "not in sync".
     last_seen_at: datetime | None
     software_version: str | None
     config_version: int | None
@@ -49,6 +51,10 @@ def _device_query():
             Device.name,
             Device.site_id,
             Site.name.label("site_name"),
+            select(func.max(DesiredConfig.version))
+            .where(DesiredConfig.site_id == Device.site_id)
+            .scalar_subquery()
+            .label("desired_config_version"),
             DeviceState.last_seen_at,
             DeviceState.software_version,
             DeviceState.config_version,

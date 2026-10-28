@@ -340,3 +340,108 @@ stable while new events arrive.
 A: Compare the last heartbeat time, measured on the cloud's clock, to a
 timeout of a few heartbeat intervals (here 3 × 10 s). Long enough to ride out
 a lost packet, short enough that operators notice quickly.
+
+## Phase 4 – Desired vs reported config, with acks
+
+### The flow
+
+```
+operator ──PUT /sites/{id}/config──▶ API
+   API: INSERT desired_configs (version N+1) → COMMIT
+   API: publish {version, config} RETAINED, QoS 1 → .../devices/{d}/config  (each device at the site)
+device: version > running? validate → apply (SQLite) → ack {applied|failed} → heartbeat with new config_version
+ingestor: store ack in config_acks; store heartbeat in device_state
+dashboard: desired_version vs reported_version + ack → in_sync / pending / failed
+```
+
+### Desired vs reported state
+
+The cloud never "sets" a device's config. It writes down what it **wants**
+(desired) and the device says what it **has** (reported). They can differ for
+hours: the device is offline, or it rejected the config. The UI shows both
+instead of pretending a change is live the moment you click Save. Kubernetes,
+AWS IoT device shadows and Azure device twins all use this same idea.
+
+### Versions, not timestamps
+
+Each change is a new row with the next integer version, never an UPDATE.
+- Devices compare plain integers: older than what I run → ignore; same → just
+  ack again; newer → validate and apply.
+- History for free: the event audit view (`GET /events/{id}`) joins on
+  `(site_id, config_version)` and shows the exact config that was active.
+
+### Why retained messages
+
+The broker keeps the last retained message per topic and delivers it as soon
+as a device subscribes. The device subscribes on every (re)connect, so a device
+that was offline during the change gets the latest config the moment it comes
+back. The cloud doesn't track who missed what. Tested: stop a device, change
+config, start it → it applies the new version within a second.
+
+### Commit, then publish, then reconcile
+
+Writing to the DB and publishing to MQTT can't be one atomic step.
+- Publish first, then the commit fails → devices run a config that doesn't
+  exist anywhere. Bad.
+- Commit first, then crash before publishing → the config is saved, but the
+  retained message is stale. This gap can be fixed.
+
+We commit first, and close the gap with a **reconciliation loop** in the
+ingestor: on every heartbeat it checks "reported < desired, and the device
+hasn't answered for that version" and re-sends the config. This is
+**level-triggered** (keep comparing state and fix any difference) rather than
+**edge-triggered** (trust that one "config changed" message arrived). It also
+pushed v1 to every device right after seeding, with no extra code.
+
+A failed ack stops the re-sending: the same config would just fail again.
+The operator has to issue a new version.
+
+### Acks are idempotent too
+
+The device acks again for every redelivery (the first ack may have been lost
+while offline). `config_acks` has primary key `(device_id, config_version)`,
+and an upsert keeps the newest ack. A composite foreign key makes sure a device
+can only ack a version that was really issued to **its** site.
+
+### Validation happens in two places
+
+- **Cloud** (Pydantic, `extra="forbid"`): shape and sane ranges; a typo'd key
+  is a 422, not a silently ignored field.
+- **Device**: what only the hardware knows. The simulated radar maxes out at
+  25 km/h, so a 30 km/h limit passes the cloud but is rejected by the device
+  with a reason. That's the `failed` state in the UI.
+
+### Optimistic concurrency (lost updates)
+
+`PUT` carries `base_version`, the version the operator started editing. If
+someone saved in the meantime, the API returns **409** instead of overwriting
+their change. Two saves at exactly the same moment both try version N+1; the
+primary key lets only one win.
+
+### Interview questions
+
+**Q: How do you push config to devices that may be offline?**
+A: Store it as versioned desired state in the cloud and publish it as a
+retained MQTT message per device. Devices subscribe on every connect, get the
+latest retained config, apply it if the version is newer, and ack. A
+reconciliation loop re-sends to any device whose reported version lags.
+
+**Q: What's the difference between desired and reported state?**
+A: Desired is what the operator asked for; reported is what the device says
+it actually runs. Keeping both lets you show drift honestly (pending, failed,
+offline) and drive retries from the difference.
+
+**Q: You write to the DB and to MQTT. What if one fails?**
+A: Commit first, then publish. The remaining gap (committed but not published)
+is closed by level-triggered reconciliation on heartbeats. The alternative is a
+transactional outbox table with a separate publisher.
+
+**Q: How do you avoid two operators overwriting each other's changes?**
+A: Optimistic concurrency: the client sends the version it edited, and the
+server rejects with 409 if that's no longer the latest. A unique version per
+site catches exact races.
+
+**Q: Why should the device validate config if the cloud already did?**
+A: The device knows things the cloud doesn't (hardware limits, firmware
+capabilities). It must never apply a config it can't honour, and it reports
+the reason back so the operator can fix it.

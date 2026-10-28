@@ -77,3 +77,25 @@ class DeviceState(Base):
     outbox_backlog: Mapped[int]
     reported_at: Mapped[datetime]
     last_seen_at: Mapped[datetime]
+
+
+class DesiredConfig(Base):
+    __tablename__ = "desired_configs"
+    site_id: Mapped[str] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[str]
+    config: Mapped[dict[str, Any]]
+    created_by: Mapped[uuid.UUID | None]
+    created_at: Mapped[datetime] = mapped_column(server_default="now()")
+
+
+class ConfigAck(Base):
+    __tablename__ = "config_acks"
+    device_id: Mapped[str] = mapped_column(primary_key=True)
+    config_version: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[str]
+    site_id: Mapped[str]
+    status: Mapped[str]
+    error: Mapped[str | None]
+    acked_at: Mapped[datetime]
+    received_at: Mapped[datetime] = mapped_column(server_default="now()")
